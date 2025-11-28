@@ -194,4 +194,20 @@ tbody tr:nth-child(odd) { background: #fafafa; }
   color: white;
   cursor: pointer;
 }
-.signin-container .error { color: #dc2626; margin-top: 10px; }
+.signin-container .error { 
+  color: #dc2626; 
+  margin-top: 10px; 
+  padding: 12px;
+  background: #fee2e2;
+  border-radius: 6px;
+  border-left: 4px solid #dc2626;
+}
+
+.stat-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+}

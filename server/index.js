@@ -38,6 +38,9 @@ let rdas = [
 // Meals storage
 let mealsByUser = {};
 
+// Health data storage
+let healthDataByUser = {};
+
 // === AUTH ENDPOINTS ===
 app.post('/api/auth/signup', (req, res) => {
   try {
@@ -245,6 +248,50 @@ app.post("/api/recommendations", (req, res) => {
   } catch (e) {
     res.status(400).json({ error: "Failed to compute recommendations" });
   }
+});
+
+// === USER ENDPOINTS ===
+app.get("/api/users", (req, res) => {
+  const usersWithoutPasswords = users.map(({ password, ...user }) => user);
+  res.json(usersWithoutPasswords);
+});
+
+// === HEALTH DATA ENDPOINTS ===
+app.post("/api/user/health-data", (req, res) => {
+  try {
+    const { userId, age, totals, deficits, timestamp } = req.body;
+    if (!userId) return res.status(400).json({ error: "userId required" });
+    
+    const record = { userId, age, totals, deficits, timestamp: timestamp || Date.now() };
+    if (!healthDataByUser[userId]) healthDataByUser[userId] = [];
+    healthDataByUser[userId].push(record);
+    
+    // Keep only last 30 records per user
+    if (healthDataByUser[userId].length > 30) {
+      healthDataByUser[userId] = healthDataByUser[userId].slice(-30);
+    }
+    
+    res.status(201).json(record);
+  } catch (e) {
+    res.status(400).json({ error: "Failed to save health data" });
+  }
+});
+
+app.get("/api/user/health-history/:userId", (req, res) => {
+  const history = healthDataByUser[req.params.userId] || [];
+  res.json(history);
+});
+
+// === ADMIN ENDPOINTS ===
+app.get("/api/admin/health-data", (req, res) => {
+  const allHealthData = [];
+  Object.keys(healthDataByUser).forEach(userId => {
+    const userHistory = healthDataByUser[userId];
+    if (userHistory.length > 0) {
+      allHealthData.push(userHistory[userHistory.length - 1]); // Get latest record per user
+    }
+  });
+  res.json(allHealthData);
 });
 
 const port = process.env.PORT || 5174;

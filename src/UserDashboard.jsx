@@ -1,44 +1,98 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bar } from "react-chartjs-2";
+import { Bar, Line, Doughnut } from "react-chartjs-2";
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
   BarElement,
+  LineElement,
+  PointElement,
+  ArcElement,
   Title,
   Tooltip,
   Legend
 } from "chart.js";
 import { DEFAULT_FOODS, findRdaForAge } from "./nutritionData";
-import { estimateMealNutrients, computeDeficits, suggestFoodsForDeficits } from "./recommendationEngine";
+import { estimateMealNutrients, computeDeficits, suggestFoodsForDeficits, generateDailyPlan } from "./recommendationEngine";
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  ArcElement,
+  Title,
+  Tooltip,
+  Legend
+);
 
 const UserDashboard = () => {
   const [age, setAge] = useState(12);
-  const [entries, setEntries] = useState([]); // { foodIdOrName, grams }
+  const [entries, setEntries] = useState([]);
   const [selectedFoodId, setSelectedFoodId] = useState(DEFAULT_FOODS[0]?.id || "");
   const [grams, setGrams] = useState(100);
-  const [syncServer, setSyncServer] = useState(false);
+  const [syncServer, setSyncServer] = useState(true);
+  const [dailyPlan, setDailyPlan] = useState(null);
+  const [activeTab, setActiveTab] = useState("tracker");
+  const [history, setHistory] = useState([]);
   const userId = "demo-user";
 
   const totals = useMemo(() => estimateMealNutrients(entries), [entries]);
   const { rda, deficits } = useMemo(() => computeDeficits(Number(age) || 12, totals), [age, totals]);
-  const suggestions = useMemo(() => suggestFoodsForDeficits(deficits, DEFAULT_FOODS, 3), [deficits]);
+  const suggestions = useMemo(() => suggestFoodsForDeficits(deficits, DEFAULT_FOODS, 5), [deficits]);
 
   const addEntry = async () => {
     if (!selectedFoodId || !grams) return;
     const newEntry = { foodIdOrName: selectedFoodId, grams: Number(grams) };
-    setEntries([...entries, newEntry]);
+    const updatedEntries = [...entries, newEntry];
+    setEntries(updatedEntries);
+    
     if (syncServer) {
       try {
-        await fetch(`/api/meals/${userId}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newEntry) });
+        await fetch(`/api/meals/${userId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(newEntry)
+        });
+        await saveHealthData(updatedEntries);
       } catch {}
     }
   };
 
   const removeEntry = (idx) => {
-    setEntries(entries.filter((_, i) => i !== idx));
+    const updatedEntries = entries.filter((_, i) => i !== idx);
+    setEntries(updatedEntries);
+    if (syncServer) {
+      saveHealthData(updatedEntries);
+    }
+  };
+
+  const saveHealthData = async (currentEntries) => {
+    try {
+      const currentTotals = estimateMealNutrients(currentEntries);
+      const currentDeficits = computeDeficits(Number(age) || 12, currentTotals);
+      await fetch("/api/user/health-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          age: Number(age) || 12,
+          totals: currentTotals,
+          deficits: currentDeficits.deficits,
+          timestamp: Date.now()
+        })
+      });
+    } catch {}
+  };
+
+  const generatePlan = async () => {
+    try {
+      const plan = generateDailyPlan(Number(age) || 12, rda.calories, DEFAULT_FOODS);
+      setDailyPlan(plan);
+    } catch (e) {
+      alert("Failed to generate plan");
+    }
   };
 
   useEffect(() => {
@@ -50,17 +104,30 @@ const UserDashboard = () => {
         if (!res.ok) return;
         const data = await res.json();
         if (mounted) setEntries(data);
+        
+        // Load history
+        const historyRes = await fetch(`/api/user/health-history/${userId}`);
+        if (historyRes.ok) {
+          const historyData = await historyRes.json();
+          if (mounted) setHistory(historyData);
+        }
       } catch {}
     })();
     return () => { mounted = false };
   }, [syncServer]);
+
+  useEffect(() => {
+    if (syncServer && entries.length > 0) {
+      saveHealthData(entries);
+    }
+  }, [entries, age]);
 
   const chartData = useMemo(() => {
     return {
       labels: ["Calories", "Protein (g)", "Iron (mg)", "Vit C (mg)", "Calcium (mg)", "Vit D (IU)"],
       datasets: [
         {
-          label: "Intake",
+          label: "Your Intake",
           data: [
             totals.calories || 0,
             totals.protein_g || 0,
@@ -69,7 +136,9 @@ const UserDashboard = () => {
             totals.calcium_mg || 0,
             totals.vitaminD_IU || 0
           ],
-          backgroundColor: "rgba(75,192,192,0.6)"
+          backgroundColor: "rgba(34, 197, 94, 0.6)",
+          borderColor: "rgba(34, 197, 94, 1)",
+          borderWidth: 2
         },
         {
           label: "Recommended",
@@ -81,11 +150,48 @@ const UserDashboard = () => {
             rda.calcium_mg,
             rda.vitaminD_IU
           ],
-          backgroundColor: "rgba(255,99,132,0.6)"
+          backgroundColor: "rgba(59, 130, 246, 0.6)",
+          borderColor: "rgba(59, 130, 246, 1)",
+          borderWidth: 2
         }
       ]
     };
   }, [totals, rda]);
+
+  const progressData = useMemo(() => {
+    const nutrientKeys = ["protein_g", "iron_mg", "vitaminC_mg", "calcium_mg", "vitaminD_IU"];
+    const percentages = nutrientKeys.map(key => {
+      const d = deficits[key];
+      return d && d.target > 0 ? Math.min(100, (d.have / d.target) * 100) : 0;
+    });
+    
+    return {
+      labels: ["Protein", "Iron", "Vit C", "Calcium", "Vit D"],
+      datasets: [{
+        label: "Progress %",
+        data: percentages,
+        backgroundColor: percentages.map(p => p >= 100 ? "rgba(34, 197, 94, 0.6)" : p >= 70 ? "rgba(245, 158, 11, 0.6)" : "rgba(239, 68, 68, 0.6)"),
+        borderColor: percentages.map(p => p >= 100 ? "rgba(34, 197, 94, 1)" : p >= 70 ? "rgba(245, 158, 11, 1)" : "rgba(239, 68, 68, 1)"),
+        borderWidth: 2
+      }]
+    };
+  }, [deficits]);
+
+  const overallHealthScore = useMemo(() => {
+    const nutrientKeys = ["protein_g", "iron_mg", "vitaminC_mg", "calcium_mg", "vitaminD_IU"];
+    const scores = nutrientKeys.map(key => {
+      const d = deficits[key];
+      return d && d.target > 0 ? Math.min(100, (d.have / d.target) * 100) : 0;
+    });
+    return Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
+  }, [deficits]);
+
+  const criticalDeficits = useMemo(() => {
+    return Object.entries(deficits)
+      .filter(([k]) => k !== "calories")
+      .filter(([_, d]) => d.gap > 0)
+      .sort((a, b) => b[1].gap - a[1].gap);
+  }, [deficits]);
 
   return (
     <div style={{
@@ -94,79 +200,375 @@ const UserDashboard = () => {
       borderRadius: "8px",
       position: "relative"
     }}>
-      <h2 style={{
-        background: "linear-gradient(135deg, #22c55e 0%, #16a34a 100%)",
-        WebkitBackgroundClip: "text",
-        WebkitTextFillColor: "transparent",
-        backgroundClip: "text"
-      }}>User Dashboard</h2>
-      <div style={{marginBottom: "16px"}}>
-        <h3>Profile</h3>
-        <label>
-          Age:
-          <input type="number" min="4" max="18" value={age} onChange={(e) => setAge(e.target.value)} style={{ marginLeft: 8 }} />
-        </label>
-        <span style={{ marginLeft: 12, color: "#666" }}>{findRdaForAge(Number(age) || 12).label}</span>
-        <label style={{ marginLeft: 16 }}>
-          <input type="checkbox" checked={syncServer} onChange={(e) => setSyncServer(e.target.checked)} /> sync with server
-        </label>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "24px" }}>
+        <h2 style={{
+          background: "linear-gradient(135deg, #22c55e 0%, #16a34a 100%)",
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent",
+          backgroundClip: "text",
+          margin: 0
+        }}>My Nutrition Dashboard</h2>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button
+            onClick={() => setActiveTab("tracker")}
+            style={{
+              padding: "8px 16px",
+              border: "1px solid var(--border)",
+              borderRadius: "6px",
+              background: activeTab === "tracker" ? "var(--primary)" : "white",
+              color: activeTab === "tracker" ? "white" : "var(--text)",
+              cursor: "pointer"
+            }}
+          >
+            Tracker
+          </button>
+          <button
+            onClick={() => setActiveTab("plan")}
+            style={{
+              padding: "8px 16px",
+              border: "1px solid var(--border)",
+              borderRadius: "6px",
+              background: activeTab === "plan" ? "var(--primary)" : "white",
+              color: activeTab === "plan" ? "white" : "var(--text)",
+              cursor: "pointer"
+            }}
+          >
+            Diet Plan
+          </button>
+          <button
+            onClick={() => setActiveTab("progress")}
+            style={{
+              padding: "8px 16px",
+              border: "1px solid var(--border)",
+              borderRadius: "6px",
+              background: activeTab === "progress" ? "var(--primary)" : "white",
+              color: activeTab === "progress" ? "white" : "var(--text)",
+              cursor: "pointer"
+            }}
+          >
+            Progress
+          </button>
+        </div>
       </div>
 
+      {/* Health Score Card */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+        gap: "16px",
+        marginBottom: "24px"
+      }}>
+        <div className="card" style={{
+          background: overallHealthScore >= 80 ? "linear-gradient(135deg, rgba(34, 197, 94, 0.1) 0%, rgba(16, 163, 74, 0.1) 100%)" :
+            overallHealthScore >= 60 ? "linear-gradient(135deg, rgba(245, 158, 11, 0.1) 0%, rgba(217, 119, 6, 0.1) 100%)" :
+            "linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(220, 38, 38, 0.1) 100%)",
+          textAlign: "center",
+          padding: "24px"
+        }}>
+          <div style={{ fontSize: "48px", fontWeight: "bold", color: overallHealthScore >= 80 ? "#22c55e" : overallHealthScore >= 60 ? "#f59e0b" : "#ef4444" }}>
+            {overallHealthScore}%
+          </div>
+          <div style={{ color: "#6b7280", marginTop: "8px", fontWeight: "500" }}>Overall Health Score</div>
+        </div>
+        <div className="card" style={{ textAlign: "center", padding: "24px" }}>
+          <div style={{ fontSize: "32px", fontWeight: "bold", color: "#3b82f6" }}>{criticalDeficits.length}</div>
+          <div style={{ color: "#6b7280", marginTop: "8px" }}>Nutrient Deficits</div>
+        </div>
+        <div className="card" style={{ textAlign: "center", padding: "24px" }}>
+          <div style={{ fontSize: "32px", fontWeight: "bold", color: "#22c55e" }}>{entries.length}</div>
+          <div style={{ color: "#6b7280", marginTop: "8px" }}>Meals Logged</div>
+        </div>
+        <div className="card" style={{ textAlign: "center", padding: "24px" }}>
+          <div style={{ fontSize: "32px", fontWeight: "bold", color: "#8b5cf6" }}>{findRdaForAge(Number(age) || 12).label}</div>
+          <div style={{ color: "#6b7280", marginTop: "8px" }}>Age Group</div>
+        </div>
+      </div>
+
+      {activeTab === "tracker" && (
       <div>
-        <h3>Log Meal</h3>
-        <select value={selectedFoodId} onChange={(e) => setSelectedFoodId(e.target.value)}>
+          <div className="card" style={{ marginBottom: "24px" }}>
+            <h3 style={{ marginTop: 0 }}>Profile Settings</h3>
+            <div style={{ display: "flex", gap: "16px", alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>Age:</span>
+                <input
+                  type="number"
+                  min="4"
+                  max="18"
+                  value={age}
+                  onChange={(e) => setAge(e.target.value)}
+                  style={{ width: "80px", padding: "8px" }}
+                />
+              </label>
+              <span style={{ color: "#6b7280" }}>{findRdaForAge(Number(age) || 12).label}</span>
+              <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <input
+                  type="checkbox"
+                  checked={syncServer}
+                  onChange={(e) => setSyncServer(e.target.checked)}
+                />
+                <span>Sync with server</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginBottom: "24px" }}>
+            <h3 style={{ marginTop: 0 }}>Log Your Meal</h3>
+            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+              <select
+                value={selectedFoodId}
+                onChange={(e) => setSelectedFoodId(e.target.value)}
+                style={{ padding: "10px", minWidth: "200px" }}
+              >
           {DEFAULT_FOODS.map(f => (
             <option key={f.id} value={f.id}>{f.name}</option>
           ))}
         </select>
-        <input type="number" min="1" value={grams} onChange={(e) => setGrams(e.target.value)} placeholder="grams" style={{ marginLeft: 8, width: 100 }} />
-        <button onClick={addEntry}>Add</button>
-        <ul>
+              <input
+                type="number"
+                min="1"
+                value={grams}
+                onChange={(e) => setGrams(e.target.value)}
+                placeholder="Grams"
+                style={{ padding: "10px", width: "120px" }}
+              />
+              <button onClick={addEntry} style={{ padding: "10px 20px" }}>Add Meal</button>
+            </div>
+            
+            {entries.length > 0 && (
+              <div style={{ marginTop: "16px" }}>
+                <h4>Today's Meals</h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
           {entries.map((entry, idx) => {
             const food = DEFAULT_FOODS.find(f => f.id === entry.foodIdOrName) || { name: entry.foodIdOrName };
             return (
-              <li key={idx}>
-                {food.name} - {entry.grams} g
-                <button onClick={() => removeEntry(idx)} style={{ marginLeft: 8 }}>Remove</button>
-              </li>
+                      <div
+                        key={idx}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          padding: "12px",
+                          background: "#f9fafb",
+                          borderRadius: "6px"
+                        }}
+                      >
+                        <span style={{ fontWeight: "500" }}>{food.name} - {entry.grams}g</span>
+                        <button
+                          onClick={() => removeEntry(idx)}
+                          style={{ background: "#ef4444", padding: "6px 12px" }}
+                        >
+                          Remove
+                        </button>
+                      </div>
             );
           })}
-        </ul>
+                </div>
+              </div>
+            )}
       </div>
 
-      <div>
-        <h3>Nutrient Intake</h3>
-        <Bar data={chartData} />
+          <div className="card" style={{ marginBottom: "24px" }}>
+            <h3 style={{ marginTop: 0 }}>Nutrient Intake vs Recommended</h3>
+            <Bar
+              data={chartData}
+              options={{
+                responsive: true,
+                plugins: {
+                  legend: { position: "top" },
+                  title: { display: false }
+                }
+              }}
+            />
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <h3>Deficit Alerts</h3>
-        <ul>
-          {Object.entries(deficits).filter(([k]) => k !== "calories").map(([key, d]) => (
-            <li key={key} style={{ color: d.gap > 0 ? "#c0392b" : "#2e7d32" }}>
-              {key}: {d.have.toFixed(1)} / {d.target} {d.gap > 0 ? `(deficit ${d.gap.toFixed(1)})` : "(met)"}
-            </li>
-          ))}
-        </ul>
+          {criticalDeficits.length > 0 && (
+            <div className="card" style={{ marginBottom: "24px" }}>
+              <h3 style={{ marginTop: 0, color: "#ef4444" }}>⚠️ Critical Deficits</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                {criticalDeficits.map(([key, d]) => (
+                  <div
+                    key={key}
+                    style={{
+                      padding: "12px",
+                      background: "#fee2e2",
+                      borderRadius: "6px",
+                      borderLeft: "4px solid #ef4444"
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontWeight: "600", textTransform: "capitalize" }}>
+                        {key.replace(/_/g, " ")}: {d.have.toFixed(1)} / {d.target}
+                      </span>
+                      <span style={{ color: "#dc2626", fontWeight: "600" }}>
+                        Deficit: {d.gap.toFixed(1)}
+                      </span>
+                    </div>
+                    <div style={{ marginTop: "8px", background: "#fff", borderRadius: "4px", height: "8px", overflow: "hidden" }}>
+                      <div
+                        style={{
+                          width: `${Math.min(100, (d.have / d.target) * 100)}%`,
+                          height: "100%",
+                          background: "#ef4444",
+                          transition: "width 0.3s"
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
       </div>
+          )}
 
-      <div style={{ marginTop: 16 }}>
-        <h3>Suggestions to Close Gaps</h3>
-        <ul>
+          {suggestions.length > 0 && (
+            <div className="card">
+              <h3 style={{ marginTop: 0 }}>💡 Personalized Recommendations</h3>
+              <p style={{ color: "#6b7280", marginBottom: "16px" }}>
+                Based on your current nutrient intake, here are foods that can help close your gaps:
+              </p>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "12px" }}>
           {suggestions.map(f => (
-            <li key={f.id}>{f.name}</li>
-          ))}
-        </ul>
-        <div style={{ marginTop: 8 }}>
-          <button onClick={async () => {
-            try {
-              const res = await fetch('/api/recommendations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ age: Number(age) || 12, entries }) });
-              const data = await res.json();
-              alert(`Server suggests: ${data.suggestions.map(s => s.name).join(', ')}`);
-            } catch {}
-          }}>Ask Server Recommendations</button>
+                  <div
+                    key={f.id}
+                    style={{
+                      padding: "16px",
+                      background: "linear-gradient(135deg, rgba(34, 197, 94, 0.1) 0%, rgba(16, 163, 74, 0.05) 100%)",
+                      borderRadius: "8px",
+                      border: "1px solid rgba(34, 197, 94, 0.2)"
+                    }}
+                  >
+                    <div style={{ fontWeight: "600", marginBottom: "8px" }}>{f.name}</div>
+                    <div style={{ fontSize: "12px", color: "#6b7280" }}>
+                      {f.calories} kcal/100g • {f.protein_g}g protein
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "plan" && (
+        <div>
+          <div className="card" style={{ marginBottom: "24px" }}>
+            <h3 style={{ marginTop: 0 }}>Generate Personalized Diet Plan</h3>
+            <p style={{ color: "#6b7280", marginBottom: "16px" }}>
+              Get a complete daily meal plan tailored to your age and nutritional needs.
+            </p>
+            <button onClick={generatePlan} style={{ padding: "12px 24px", fontSize: "16px" }}>
+              Generate Daily Plan
+            </button>
+          </div>
+
+          {dailyPlan && (
+            <div className="card">
+              <h3 style={{ marginTop: 0 }}>Your Daily Meal Plan</h3>
+              <div style={{ marginBottom: "16px" }}>
+                <h4>Meals</h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {dailyPlan.meals.map((meal, idx) => {
+                    const food = DEFAULT_FOODS.find(f => f.id === meal.foodIdOrName);
+                    return (
+                      <div
+                        key={idx}
+                        style={{
+                          padding: "12px",
+                          background: "#f9fafb",
+                          borderRadius: "6px",
+                          display: "flex",
+                          justifyContent: "space-between"
+                        }}
+                      >
+                        <span style={{ fontWeight: "500" }}>
+                          {idx + 1}. {food?.name || meal.foodIdOrName} - {meal.grams}g
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div style={{ marginTop: "16px" }}>
+                <h4>Expected Totals</h4>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "12px", marginTop: "12px" }}>
+                  <div style={{ padding: "12px", background: "#f9fafb", borderRadius: "6px" }}>
+                    <div style={{ fontSize: "12px", color: "#6b7280" }}>Calories</div>
+                    <div style={{ fontSize: "20px", fontWeight: "600" }}>{dailyPlan.totals.calories.toFixed(0)}</div>
+                  </div>
+                  <div style={{ padding: "12px", background: "#f9fafb", borderRadius: "6px" }}>
+                    <div style={{ fontSize: "12px", color: "#6b7280" }}>Protein</div>
+                    <div style={{ fontSize: "20px", fontWeight: "600" }}>{dailyPlan.totals.protein_g.toFixed(1)}g</div>
+                  </div>
+                  <div style={{ padding: "12px", background: "#f9fafb", borderRadius: "6px" }}>
+                    <div style={{ fontSize: "12px", color: "#6b7280" }}>Iron</div>
+                    <div style={{ fontSize: "20px", fontWeight: "600" }}>{dailyPlan.totals.iron_mg.toFixed(1)}mg</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "progress" && (
+        <div>
+          <div className="card" style={{ marginBottom: "24px" }}>
+            <h3 style={{ marginTop: 0 }}>Nutrient Progress</h3>
+            <Bar
+              data={progressData}
+              options={{
+                responsive: true,
+                scales: {
+                  y: {
+                    beginAtZero: true,
+                    max: 100
+                  }
+                },
+                plugins: {
+                  legend: { display: false },
+                  title: { display: false }
+                }
+              }}
+            />
+          </div>
+
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Health Insights</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              {Object.entries(deficits)
+                .filter(([k]) => k !== "calories")
+                .map(([key, d]) => {
+                  const percentage = d.target > 0 ? (d.have / d.target) * 100 : 0;
+                  return (
+                    <div key={key}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                        <span style={{ fontWeight: "500", textTransform: "capitalize" }}>
+                          {key.replace(/_/g, " ")}
+                        </span>
+                        <span style={{ color: percentage >= 100 ? "#22c55e" : percentage >= 70 ? "#f59e0b" : "#ef4444", fontWeight: "600" }}>
+                          {percentage.toFixed(1)}%
+                        </span>
+                      </div>
+                      <div style={{ background: "#e5e7eb", borderRadius: "4px", height: "12px", overflow: "hidden" }}>
+                        <div
+                          style={{
+                            width: `${Math.min(100, percentage)}%`,
+                            height: "100%",
+                            background: percentage >= 100 ? "#22c55e" : percentage >= 70 ? "#f59e0b" : "#ef4444",
+                            transition: "width 0.3s"
+                          }}
+                        />
+                      </div>
+                      <div style={{ fontSize: "12px", color: "#6b7280", marginTop: "4px" }}>
+                        {d.have.toFixed(1)} / {d.target} {d.gap > 0 && `(Need ${d.gap.toFixed(1)} more)`}
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
         </div>
       </div>
+      )}
     </div>
   );
 };
