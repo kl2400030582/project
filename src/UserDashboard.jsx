@@ -88,8 +88,18 @@ const UserDashboard = () => {
   }, [totals, rda]);
 
   return (
-    <div style={{padding: "20px"}}>
-      <h2>User Dashboard</h2>
+    <div style={{
+      padding: "20px",
+      background: "linear-gradient(135deg, rgba(34, 197, 94, 0.02) 0%, rgba(16, 163, 74, 0.02) 100%)",
+      borderRadius: "8px",
+      position: "relative"
+    }}>
+      <h2 style={{
+        background: "linear-gradient(135deg, #22c55e 0%, #16a34a 100%)",
+        WebkitBackgroundClip: "text",
+        WebkitTextFillColor: "transparent",
+        backgroundClip: "text"
+      }}>User Dashboard</h2>
       <div style={{marginBottom: "16px"}}>
         <h3>Profile</h3>
         <label>
